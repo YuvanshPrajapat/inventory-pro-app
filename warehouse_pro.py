@@ -1,154 +1,144 @@
 import streamlit as st
+import streamlit_authenticator as stauth
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import pandas as pd
 
-# --- DATABASE CONNECTION ---
+# --- 1. DATABASE CONNECTION ---
 def get_connection():
-    # This pulls the database URL from the cloud settings, NOT hardcoded
-    return psycopg2.connect(st.secrets["postgres_url"])
+    # In Streamlit Cloud, use st.secrets. Locally, you can replace with your string.
+    try:
+        return psycopg2.connect(st.secrets["postgres_url"])
+    except:
+        # Fallback for local testing if secrets aren't set
+        return psycopg2.connect(
+            host="localhost",
+            database="inventory_system",
+            user="postgres",
+            password="YOUR_PASSWORD"
+        )
 
-st.set_page_config(page_title="Warehouse Pro", layout="wide")
-st.title("🛡️ Warehouse Pro: Ledger Edition")
-
-# Create Tabs for different tasks
-tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "➕ Add Product/Stock", "📜 Audit Log"])
-
-# --- TAB 1: LIVE DASHBOARD ---
-with tab1:
-    st.header("Live Inventory Status")
-    
-    # 1. User Inputs for Filtering
-    col_input1, col_input2 = st.columns([1, 2])
-    with col_input1:
-        threshold = st.number_input("Low Stock Threshold Alert", min_value=1, value=5)
-    with col_input2:
-        search_query = st.text_input("🔍 Search by Product Name or SKU", "").strip().upper()
-    
-    # 2. Trigger Data Fetch
-    if st.button("🔄 Refresh & Sync Data"):
+# --- 2. AUTHENTICATION LOGIC ---
+def fetch_users():
+    try:
         with get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # We pull from the SQL View we created earlier
-                cur.execute("SELECT * FROM current_stock;")
-                rows = cur.fetchall()
-                
-                if rows:
-                    import pandas as pd
-                    df = pd.DataFrame(rows)
-                    
-                    # 3. Calculate Global Metrics
-                    low_stock_items = [r for r in rows if r['total_qty'] <= threshold]
-                    
-                    # 4. Display Quick Stats Row
-                    st.divider()
-                    m_col1, m_col2, m_col3 = st.columns(3)
-                    with m_col1:
-                        st.metric("Total Unique Products", len(df['sku'].unique()))
-                    with m_col2:
-                        st.metric("Total Units in Stock", int(df['total_qty'].sum()))
-                    with m_col3:
-                        st.metric("Low Stock Items", len(low_stock_items), delta=-len(low_stock_items), delta_color="inverse")
-                    
-                    # 5. Apply Search Filter (if user typed something)
-                    if search_query:
-                        df = df[df['name'].str.upper().str.contains(search_query) | 
-                                df['sku'].str.contains(search_query)]
-                    
-                    # 6. Low Stock Alert Message
-                    if low_stock_items:
-                        st.error(f"⚠️ Critical: {len(low_stock_items)} items are below the threshold level!")
+                cur.execute("SELECT username, name, password_hash as password FROM users")
+                return cur.fetchall()
+    except Exception as e:
+        st.error(f"Database connection failed: {e}")
+        return []
 
-                    # 7. Define Conditional Formatting (Red for Low Stock)
-                    def highlight_low_stock(s):
-                        return ['background-color: #ffcccc' if s.total_qty <= threshold else '' for _ in s]
-                    
-                    # 8. Display the Styled Table
-                    st.subheader("Inventory Detail Table")
-                    st.dataframe(
-                        df.style.apply(highlight_low_stock, axis=1), 
-                        use_container_width=True,
-                        hide_index=True
-                    )
+db_users = fetch_users()
+credentials = {
+    "usernames": {
+        u['username']: {
+            "name": u['name'],
+            "password": u['password']
+        } for u in db_users
+    }
+}
 
-                    # 9. Export Option
-                    st.divider()
-                    csv_data = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="📥 Download This View as CSV",
-                        data=csv_data,
-                        file_name='inventory_report.csv',
-                        mime='text/csv'
-                    )
-                else:
-                    st.warning("The inventory ledger is currently empty. Please add stock in the 'Operations' tab.")
+# Initialize Authenticator (v0.3+ Syntax)
+authenticator = stauth.Authenticate(
+    credentials,
+    "inventory_manager_cookie",
+    "auth_signature_key",
+    cookie_expiry_days=30
+)
 
-# --- TAB 2: OPERATIONS (Add/Sell) ---
-with tab2:
-    col1, col2 = st.columns(2)
+# Render Login UI
+name, authentication_status, username = authenticator.login("Login", "main")
+
+if authentication_status:
+    # --- AUTHENTICATED AREA ---
+    st.sidebar.title(f"Welcome, {name}")
+    authenticator.logout("Logout", "sidebar")
     
-    with col1:
-        st.subheader("Add New Product")
-        new_sku = st.text_input("New SKU (e.g. PHN-001)")
-        new_name = st.text_input("Product Name")
-        new_color = st.color_picker("Product Color Tag", "#00f")
-        
-        if st.button("✨ Register Product"):
-            try:
-                with get_connection() as conn:
-                    with conn.cursor() as cur:
-                        # Inserting into our JSONB column
-                        cur.execute(
-                            "INSERT INTO products (sku, name, attributes) VALUES (%s, %s, %s)",
-                            (new_sku.upper(), new_name, f'{{"color": "{new_color}"}}')
-                        )
-                    conn.commit()
-                st.success(f"Product {new_sku} registered!")
-            except Exception as e:
-                st.error(f"Error: {e}")
+    st.title("🛡️ Warehouse Pro: Ledger Edition")
+    tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "➕ Operations", "📜 Audit Log"])
 
-    with col2:
-        st.subheader("Stock In / Stock Out")
-        op_sku = st.text_input("Enter SKU to update")
-        op_type = st.selectbox("Transaction Type", ["shipment", "sale", "return"])
+    # --- TAB 1: DASHBOARD ---
+    with tab1:
+        st.header("Live Inventory Status")
+        col_in1, col_in2 = st.columns([1, 2])
+        with col_in1:
+            threshold = st.number_input("Low Stock Alert Level", min_value=1, value=5)
+        with col_in2:
+            search_query = st.text_input("🔍 Search SKU or Product Name", "").strip().upper()
+
+        if st.button("🔄 Refresh Data"):
+            with get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM current_stock;")
+                    rows = cur.fetchall()
+                    if rows:
+                        df = pd.DataFrame(rows)
+                        low_stock_items = [r for r in rows if r['total_qty'] <= threshold]
+                        
+                        # Metrics
+                        st.divider()
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Unique Products", len(df['sku'].unique()))
+                        m2.metric("Total Units", int(df['total_qty'].sum()))
+                        m3.metric("Low Stock Alerts", len(low_stock_items))
+
+                        # Search Filter
+                        if search_query:
+                            df = df[df['name'].str.upper().str.contains(search_query) | 
+                                    df['sku'].str.contains(search_query)]
+
+                        # Table with Highlighting
+                        def highlight_rows(s):
+                            return ['background-color: #ffcccc' if s.total_qty <= threshold else '' for _ in s]
+                        
+                        st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True)
+                        
+                        # Export
+                        csv = df.to_csv(index=False).encode('utf-8')
+                        st.download_button("📥 Download CSV Report", data=csv, file_name='stock_report.csv')
+
+    # --- TAB 2: OPERATIONS ---
+    with tab2:
+        st.subheader("Process Transactions")
+        op_sku = st.text_input("Target SKU").upper()
+        op_type = st.selectbox("Type", ["sale", "shipment", "return"])
         op_qty = st.number_input("Quantity", min_value=1)
-        
-        if st.button("Confirm Transaction"):
+
+        if st.button("Execute Transaction"):
             try:
-                # If it's a sale, we make the number negative for the ledger
-                final_qty = -op_qty if op_type == "sale" else op_qty
-                
                 with get_connection() as conn:
                     with conn.cursor() as cur:
-                        # Using our safe SQL function
                         if op_type == "sale":
-                            cur.execute("SELECT process_sale(%s, 'MDC', %s)", (op_sku.upper(), op_qty))
-                            res = cur.fetchone()[0]
+                            cur.execute("SELECT process_sale(%s, 'MDC', %s)", (op_sku, op_qty))
+                            msg = cur.fetchone()[0]
                         else:
-                            # Standard shipment/return logic
+                            qty = op_qty if op_type != "sale" else -op_qty
                             cur.execute("""
                                 INSERT INTO inventory_ledger (product_id, warehouse_id, change_amount, reason)
-                                VALUES (
-                                    (SELECT product_id FROM products WHERE sku = %s),
-                                    (SELECT warehouse_id FROM warehouses WHERE code = 'MDC'),
-                                    %s, %s
-                                )""", (op_sku.upper(), final_qty, op_type))
-                            res = "Stock updated successfully!"
+                                VALUES ((SELECT product_id FROM products WHERE sku=%s), 
+                                        (SELECT warehouse_id FROM warehouses WHERE code='MDC'), %s, %s)
+                            """, (op_sku, qty, op_type))
+                            msg = "Stock successfully updated!"
                     conn.commit()
-                st.success(res)
+                st.success(msg)
             except Exception as e:
-                st.error(f"Action Failed: {e}")
+                st.error(f"Transaction Denied: {e}")
 
-# --- TAB 3: AUDIT LOG ---
-with tab3:
-    st.header("Full Transaction History")
-    st.info("This is an immutable ledger. Entries cannot be deleted.")
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT l.created_at, p.sku, p.name, l.change_amount, l.reason 
-                FROM inventory_ledger l 
-                JOIN products p ON l.product_id = p.product_id 
-                ORDER BY l.created_at DESC
-            """)
-            st.table(cur.fetchall())
+    # --- TAB 3: AUDIT LOG ---
+    with tab3:
+        st.header("Transaction Ledger")
+        with get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT l.created_at, p.sku, p.name, l.change_amount, l.reason 
+                    FROM inventory_ledger l 
+                    JOIN products p ON l.product_id = p.product_id 
+                    ORDER BY l.created_at DESC LIMIT 50
+                """)
+                st.table(cur.fetchall())
+
+elif authentication_status == False:
+    st.error("Username/password is incorrect")
+elif authentication_status == None:
+    st.warning("Please enter your credentials")
