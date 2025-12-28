@@ -47,8 +47,18 @@ authenticator = stauth.Authenticate(
     cookie_expiry_days=30
 )
 
-# Render Login UI
-name, authentication_status, username = authenticator.login("Login", "main")
+# The new version often only requires the label or uses keyword arguments
+try:
+    # Try the most modern syntax
+    authenticator.login(location='main')
+except:
+    # Fallback for slightly older versions
+    authenticator.login("Login", "main")
+
+# Then access the status from the session state
+authentication_status = st.session_state["authentication_status"]
+name = st.session_state["name"]
+username = st.session_state["username"]
 
 if authentication_status:
     # --- AUTHENTICATED AREA ---
